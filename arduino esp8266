@@ -1,0 +1,85 @@
+#include <ESP8266WiFi.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+/* ----------- WIFI ---------- */
+const char* ssid = "name";
+const char* password = "pasword";
+
+/* ----------- TCP SERVER PC ---------- */
+const char* serverIP = "*****";   // IP du PC
+const uint16_t serverPort = 5005;
+WiFiClient client;
+
+/* ----------- DS18B20 ---------- */
+// GPIO4 = D2 sur NodeMCU
+#define ONE_WIRE_BUS 4   // GPIO4
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+/* ----------- ANALOG ---------- */
+// ESP8266 → une seule entrée analogique
+#define PIN_ANALOG A0
+
+void setup() {
+  Serial.begin(115200);
+
+  /* DS18B20 */
+  sensors.begin();
+
+  /* WiFi */
+  WiFi.begin(ssid, password);
+  Serial.println("Connexion au WiFi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nConnecté !");
+  Serial.print("IP ESP8266 : ");
+  Serial.println(WiFi.localIP());
+}
+
+void loop() {
+
+  /* ----------- Connexion TCP ---------- */
+  if (!client.connected()) {
+    Serial.println("Connexion au serveur TCP...");
+    if (!client.connect(serverIP, serverPort)) {
+      Serial.println("Échec de connexion, nouvelle tentative...");
+      delay(2000);
+      return;
+    }
+    Serial.println("Connecté au serveur !");
+  }
+
+  /* ----------- LECTURE CAPTEURS ---------- */
+
+  // DS18B20
+  sensors.requestTemperatures();
+  float temperature = sensors.getTempCByIndex(0);
+
+  // Lecture analogique
+  int raw = analogRead(PIN_ANALOG);
+
+  // ⚠️ Conversion à adapter selon ton montage réel
+  float courant = (raw / 1023.0) * 3.3;    // Exemple
+  float tension = (raw / 1023.0) * 11.0;   // Exemple
+
+  // Rotation simulée
+  int rotation = random(1000, 2000);
+
+  /* ----------- FORMAT TCP ---------- */
+  String payload = String(temperature, 2) + ";" +
+                   String(courant, 2) + ";" +
+                   String(tension, 2) + ";" +
+                   String(rotation) + "\n";
+
+  /* ----------- ENVOI ---------- */
+  client.print(payload);
+
+  Serial.print("Données envoyées : ");
+  Serial.println(payload);
+
+  delay(2000);
+}
