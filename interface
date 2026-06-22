@@ -1,0 +1,703 @@
+import customtkinter as ctk
+from PIL import Image, ImageTk
+import tkinter as tk
+from tkinter import messagebox
+import sys
+import random
+import time
+from datetime import datetime
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import numpy as np
+import threading
+import joblib
+import pandas as pd
+import socket
+
+# TCP Server Configuration
+HOST = "0.0.0.0"
+PORT = 5005
+
+# Global data storage for sensor values
+latest_data = {
+    "temperature": 0.0,
+    "current": 0.0,
+    "tension": 0.0,
+    "rotation": 0.0
+}
+
+
+def handle_client(conn):
+    """Handle incoming TCP client connection"""
+    global latest_data
+    print("Client connecté !")
+
+    while True:
+        try:
+            data = conn.recv(1024)
+            if not data:
+                break
+
+            decoded = data.decode().strip()
+            parts = decoded.split(";")
+
+            if len(parts) == 4:
+                latest_data["temperature"] = float(parts[0])
+                latest_data["current"] = float(parts[1])
+                latest_data["tension"] = float(parts[2])
+                latest_data["rotation"] = float(parts[3])
+
+                print("Reçu :", latest_data)
+
+        except Exception as e:
+            print(f"Erreur réception: {e}")
+            break
+
+    print("Client déconnecté")
+    conn.close()
+
+
+def tcp_server():
+    """Start TCP server to receive sensor data"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, PORT))
+        s.listen(1)
+        print(f"Serveur TCP en écoute sur {HOST}:{PORT}")
+
+        while True:
+            conn, addr = s.accept()
+            print(f"Connexion de {addr}")
+            threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
+
+
+# Start TCP server in background
+threading.Thread(target=tcp_server, daemon=True).start()
+
+
+def handle_error(func):
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            print(f'Error in {func.__name__}: {str(e)}')
+            return None
+
+    return wrapper
+
+
+# -----------------------------
+#  LOAD ML MODEL
+# -----------------------------
+try:
+    model = joblib.load("model_predictive_maintenance.pkl")
+    print("✓ Modèle ML chargé avec succès")
+except:
+    model = None
+    print("❌ Modèle ML non disponible - Mode simulation activé")
+
+
+def predict_state(temp, current, tension, rotation):
+    """Predict system state using ML model"""
+    if model is None:
+        # Fallback to rule-based prediction
+        if temp > 75:
+            return "CRITIQUE"
+        elif temp > 60 or current > 18:
+            return "ATTENTION"
+        elif tension < 215 or tension > 225:
+            return "AVERTISSEMENT"
+        else:
+            return "NORMAL"
+
+    try:
+        X = pd.DataFrame([[temp, current, tension, rotation]],
+                         columns=['temperature', 'current', 'tension', 'rotation'])
+        pred = model.predict(X)[0]
+        return pred
+    except Exception as e:
+        print(f"Erreur prédiction ML: {e}")
+        return "Erreur prédiction"
+
+
+class SensorSimulator:
+    """Receives sensor data from TCP server"""
+
+    def __init__(self):
+        self.temperature = 0.0  # °C
+        self.current = 0.0  # A
+        self.voltage = 0.0  # V
+        self.rotation = 0.0  # RPM
+        self.time_data = []
+        self.temp_data = []
+        self.current_data = []
+        self.voltage_data = []
+        self.rotation_data = []
+        self.max_points = 100
+
+    def update(self):
+        """Update sensor values from TCP data"""
+        global latest_data
+
+        # Get data from TCP server
+        self.temperature = latest_data["temperature"]
+        self.current = latest_data["current"]
+        self.voltage = latest_data["tension"]
+        self.rotation = latest_data["rotation"]
+
+        # Store data for graphing
+        current_time = len(self.time_data)
+        self.time_data.append(current_time)
+        self.temp_data.append(self.temperature)
+        self.current_data.append(self.current)
+        self.voltage_data.append(self.voltage)
+        self.rotation_data.append(self.rotation)
+
+        # Keep only last max_points
+        if len(self.time_data) > self.max_points:
+            self.time_data.pop(0)
+            self.temp_data.pop(0)
+            self.current_data.pop(0)
+            self.voltage_data.pop(0)
+            self.rotation_data.pop(0)
+
+    def get_system_status(self):
+        """Determine system status using ML model or rules"""
+        return predict_state(self.temperature, self.current, self.voltage, self.rotation)
+
+
+class DashboardView(ctk.CTkFrame):
+    """Dashboard with real-time graphs using matplotlib"""
+
+    def __init__(self, master, sensor):
+        super().__init__(master, fg_color=('#55829f', '#55829f'), corner_radius=0)
+        self.sensor = sensor
+        self.setup_ui()
+
+    def setup_ui(self):
+        # Title
+        title = ctk.CTkLabel(
+            self,
+            text="Tableau de Bord - Évolution en Temps Réel",
+            font=("Arial", 22, "bold"),
+            text_color="#FFFFFF"
+        )
+        title.pack(pady=15)
+
+        # Create matplotlib figure with dark theme
+        plt.style.use('dark_background')
+        self.fig, self.axes = plt.subplots(2, 2, figsize=(10, 6))
+        self.fig.patch.set_facecolor('#55829f')
+        self.fig.subplots_adjust(hspace=0.35, wspace=0.3, left=0.08, right=0.95, top=0.95, bottom=0.08)
+
+        # Flatten axes for easier access
+        self.ax_temp = self.axes[0, 0]
+        self.ax_current = self.axes[0, 1]
+        self.ax_voltage = self.axes[1, 0]
+        self.ax_rotation = self.axes[1, 1]
+
+        # Configure each subplot
+        configs = [
+            (self.ax_temp, "Température (°C)", "#FF6B6B"),
+            (self.ax_current, "Courant (A)", "#4ECDC4"),
+            (self.ax_voltage, "Tension (V)", "#FFD93D"),
+            (self.ax_rotation, "Rotation (RPM)", "#95E1D3")
+        ]
+
+        for ax, title, color in configs:
+            ax.set_title(title, color='white', fontsize=11, fontweight='bold', pad=8)
+            ax.set_facecolor('#2d4a5b')
+            ax.tick_params(colors='white', labelsize=8)
+            ax.grid(True, alpha=0.3, color='white', linestyle='--', linewidth=0.5)
+            ax.set_xlabel('Temps (s)', color='white', fontsize=9)
+            for spine in ax.spines.values():
+                spine.set_color('white')
+                spine.set_linewidth(0.5)
+
+        # Create canvas
+        self.canvas = FigureCanvasTkAgg(self.fig, self)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # Initial draw
+        self.update_graphs()
+
+    def update_graphs(self):
+        """Update all graphs with latest data"""
+        if len(self.sensor.time_data) < 2:
+            return
+
+        # Get data
+        x = self.sensor.time_data
+
+        # Clear and plot each graph
+        self.ax_temp.clear()
+        self.ax_temp.plot(x, self.sensor.temp_data, color='#FF6B6B', linewidth=2, label='Température')
+        self.ax_temp.fill_between(x, self.sensor.temp_data, alpha=0.3, color='#FF6B6B')
+        self.ax_temp.set_title("Température (°C)", color='white', fontsize=11, fontweight='bold')
+        self.ax_temp.set_ylabel('°C', color='white', fontsize=9)
+
+        self.ax_current.clear()
+        self.ax_current.plot(x, self.sensor.current_data, color='#4ECDC4', linewidth=2, label='Courant')
+        self.ax_current.fill_between(x, self.sensor.current_data, alpha=0.3, color='#4ECDC4')
+        self.ax_current.set_title("Courant (A)", color='white', fontsize=11, fontweight='bold')
+        self.ax_current.set_ylabel('A', color='white', fontsize=9)
+
+        self.ax_voltage.clear()
+        self.ax_voltage.plot(x, self.sensor.voltage_data, color='#FFD93D', linewidth=2, label='Tension')
+        self.ax_voltage.fill_between(x, self.sensor.voltage_data, alpha=0.3, color='#FFD93D')
+        self.ax_voltage.set_title("Tension (V)", color='white', fontsize=11, fontweight='bold')
+        self.ax_voltage.set_ylabel('V', color='white', fontsize=9)
+
+        self.ax_rotation.clear()
+        self.ax_rotation.plot(x, self.sensor.rotation_data, color='#95E1D3', linewidth=2, label='Rotation')
+        self.ax_rotation.fill_between(x, self.sensor.rotation_data, alpha=0.3, color='#95E1D3')
+        self.ax_rotation.set_title("Rotation (RPM)", color='white', fontsize=11, fontweight='bold')
+        self.ax_rotation.set_ylabel('RPM', color='white', fontsize=9)
+
+        # Reconfigure all axes
+        for ax in [self.ax_temp, self.ax_current, self.ax_voltage, self.ax_rotation]:
+            ax.set_facecolor('#2d4a5b')
+            ax.tick_params(colors='white', labelsize=8)
+            ax.grid(True, alpha=0.3, color='white', linestyle='--', linewidth=0.5)
+            ax.set_xlabel('Temps (s)', color='white', fontsize=9)
+            for spine in ax.spines.values():
+                spine.set_color('white')
+                spine.set_linewidth(0.5)
+
+        self.canvas.draw()
+
+
+class SystemStatusView(ctk.CTkFrame):
+    """Real-time system status display"""
+
+    def __init__(self, master, sensor):
+        super().__init__(master, fg_color=('#55829f', '#55829f'), corner_radius=0)
+        self.sensor = sensor
+        self.setup_ui()
+
+    def setup_ui(self):
+        # Title
+        title = ctk.CTkLabel(
+            self,
+            text="État du Système - Temps Réel",
+            font=("Arial", 22, "bold"),
+            text_color="#FFFFFF"
+        )
+        title.pack(pady=20)
+
+        # Status indicator with ML prediction
+        self.status_frame = ctk.CTkFrame(self, fg_color='#3d5a6b', corner_radius=10)
+        self.status_frame.pack(pady=10, padx=20, fill=tk.X)
+
+        ctk.CTkLabel(
+            self.status_frame,
+            text="État du Système:",
+            font=("Arial", 16, "bold"),
+            text_color="#FFFFFF"
+        ).pack(side=tk.LEFT, padx=20, pady=15)
+
+        self.status_label = ctk.CTkLabel(
+            self.status_frame,
+            text="NORMAL",
+            font=("Arial", 18, "bold"),
+            text_color="#00FF00"
+        )
+        self.status_label.pack(side=tk.LEFT, padx=20, pady=15)
+
+        # ML Model status
+        model_status = "✓ Modèle ML actif" if model else "⚠ Mode simulation (pas de modèle ML)"
+        ctk.CTkLabel(
+            self.status_frame,
+            text=model_status,
+            font=("Arial", 12),
+            text_color="#CCCCCC"
+        ).pack(side=tk.RIGHT, padx=20, pady=15)
+
+        # Sensor readings frame
+        readings_frame = ctk.CTkFrame(self, fg_color='transparent')
+        readings_frame.pack(pady=20, padx=20, fill=tk.BOTH, expand=True)
+
+        # Create sensor displays
+        self.sensor_displays = []
+        sensors = [
+            ("Température", "°C", "#FF6B6B"),
+            ("Courant", "A", "#4ECDC4"),
+            ("Tension", "V", "#FFD93D"),
+            ("Rotation", "RPM", "#95E1D3")
+        ]
+
+        for i, (name, unit, color) in enumerate(sensors):
+            frame = ctk.CTkFrame(readings_frame, fg_color='#3d5a6b', corner_radius=10)
+            frame.grid(row=i // 2, column=i % 2, padx=10, pady=10, sticky="nsew")
+
+            ctk.CTkLabel(
+                frame,
+                text=name,
+                font=("Arial", 14, "bold"),
+                text_color=color
+            ).pack(pady=(15, 5))
+
+            value_label = ctk.CTkLabel(
+                frame,
+                text="0.0",
+                font=("Arial", 32, "bold"),
+                text_color="#FFFFFF"
+            )
+            value_label.pack(pady=5)
+
+            ctk.CTkLabel(
+                frame,
+                text=unit,
+                font=("Arial", 12),
+                text_color="#CCCCCC"
+            ).pack(pady=(0, 15))
+
+            self.sensor_displays.append(value_label)
+
+        # Configure grid weights
+        readings_frame.grid_columnconfigure(0, weight=1)
+        readings_frame.grid_columnconfigure(1, weight=1)
+        readings_frame.grid_rowconfigure(0, weight=1)
+        readings_frame.grid_rowconfigure(1, weight=1)
+
+        # Update display
+        self.update_display()
+
+    def update_display(self):
+        """Update sensor displays"""
+        # Update sensor values
+        values = [
+            f"{self.sensor.temperature:.2f}",
+            f"{self.sensor.current:.2f}",
+            f"{self.sensor.voltage:.2f}",
+            f"{self.sensor.rotation:.0f}"
+        ]
+
+        for display, value in zip(self.sensor_displays, values):
+            display.configure(text=value)
+
+        # Update status using ML prediction
+        status = self.sensor.get_system_status()
+        status_colors = {
+            "NORMAL": "#00FF00",
+            "AVERTISSEMENT": "#FFA500",
+            "ATTENTION": "#FF6B00",
+            "CRITIQUE": "#FF0000"
+        }
+
+        # Handle different status formats
+        status_upper = str(status).upper()
+        color = "#00FF00"  # default green
+
+        for key in status_colors.keys():
+            if key in status_upper:
+                color = status_colors[key]
+                break
+
+        display_status = "⚠️ " + status if status != "NORMAL" else status
+
+        self.status_label.configure(
+            text=display_status,
+            text_color=color
+        )
+
+
+class ChatBotView(ctk.CTkFrame):
+    """Chatbot for system queries"""
+
+    def __init__(self, master, sensor):
+        super().__init__(master, fg_color=('#55829f', '#55829f'), corner_radius=0)
+        self.sensor = sensor
+        self.setup_ui()
+
+    def setup_ui(self):
+        # Title
+        title = ctk.CTkLabel(
+            self,
+            text="Assistant Virtuel - Système",
+            font=("Arial", 22, "bold"),
+            text_color="#FFFFFF"
+        )
+        title.pack(pady=20)
+
+        # Chat display
+        self.chat_frame = ctk.CTkFrame(self, fg_color='#3d5a6b', corner_radius=10)
+        self.chat_frame.pack(pady=10, padx=20, fill=tk.BOTH, expand=True)
+
+        self.chat_display = ctk.CTkTextbox(
+            self.chat_frame,
+            font=("Arial", 12),
+            fg_color='#2d4a5b',
+            text_color='#FFFFFF',
+            wrap=tk.WORD
+        )
+        self.chat_display.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+        # Input frame
+        input_frame = ctk.CTkFrame(self, fg_color='transparent')
+        input_frame.pack(pady=10, padx=20, fill=tk.X)
+
+        self.input_entry = ctk.CTkEntry(
+            input_frame,
+            placeholder_text="Pose une question...",
+            font=("Arial", 12),
+            height=40
+        )
+        self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        self.input_entry.bind("<Return>", lambda e: self.send_message())
+
+        send_btn = ctk.CTkButton(
+            input_frame,
+            text="Envoyer",
+            command=self.send_message,
+            font=("Arial", 12, "bold"),
+            fg_color='#008080',
+            hover_color='#80ffff',
+            width=100,
+            height=40
+        )
+        send_btn.pack(side=tk.RIGHT)
+
+        # Welcome message
+        welcome_msg = "Bonjour! Je suis votre assistant virtuel.\n"
+        if model:
+            welcome_msg += "✓ Système avec prédiction ML activé\n\n"
+        else:
+            welcome_msg += "⚠ Mode simulation (pas de modèle ML)\n\n"
+        welcome_msg += "Tu peux demander:\n- état\n- température\n- rotation\n- courant\n- tension\n- toutes les valeurs"
+
+        self.add_message("Assistant", welcome_msg)
+
+    def add_message(self, sender, message):
+        """Add message to chat display"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.chat_display.insert(tk.END, f"[{timestamp}] {sender}:\n{message}\n\n")
+        self.chat_display.see(tk.END)
+
+    def send_message(self):
+        """Process user message"""
+        user_input = self.input_entry.get().strip().lower()
+        if not user_input:
+            return
+
+        self.add_message("Vous", user_input)
+        self.input_entry.delete(0, tk.END)
+
+        # Generate response
+        response = self.generate_response(user_input)
+        self.add_message("Assistant", response)
+
+    def generate_response(self, q):
+        """Generate chatbot response based on user input"""
+        status = self.sensor.get_system_status()
+
+        if "etat" in q or "état" in q or "status" in q:
+            return f"""État du système: {status}
+
+📊 Valeurs actuelles:
+• Température: {self.sensor.temperature:.2f}°C
+• Courant: {self.sensor.current:.2f} A
+• Tension: {self.sensor.voltage:.2f} V
+• Rotation: {self.sensor.rotation:.0f} RPM"""
+
+        elif "temperature" in q or "température" in q or "temp" in q:
+            temp = self.sensor.temperature
+            if temp > 75:
+                return f"⚠️ ALERTE: Température actuelle: {temp:.2f}°C - CRITIQUE!"
+            elif temp > 60:
+                return f"⚠️ ATTENTION: Température actuelle: {temp:.2f}°C - Élevée."
+            else:
+                return f"✓ Température actuelle: {temp:.2f}°C - Normale."
+
+        elif "rotation" in q or "vitesse" in q or "rpm" in q:
+            return f"✓ Rotation actuelle: {self.sensor.rotation:.0f} RPM."
+
+        elif "courant" in q or "current" in q or "intensité" in q:
+            return f"✓ Courant actuel: {self.sensor.current:.2f} A."
+
+        elif "tension" in q or "voltage" in q or "volt" in q:
+            voltage = self.sensor.voltage
+            if 215 <= voltage <= 225:
+                return f"✓ Tension actuelle: {voltage:.2f} V - Optimale."
+            else:
+                return f"⚠️ Tension actuelle: {voltage:.2f} V - Hors plage optimale."
+
+        elif "tout" in q or "toute" in q or "all" in q or "valeur" in q:
+            return f"""📊 Toutes les valeurs actuelles:
+
+• Température: {self.sensor.temperature:.2f}°C
+• Courant: {self.sensor.current:.2f} A
+• Tension: {self.sensor.voltage:.2f} V
+• Rotation: {self.sensor.rotation:.0f} RPM
+• État: {status}"""
+
+        else:
+            return "Tu peux demander : état, température, rotation, courant, tension, toutes les valeurs."
+
+
+class ExportedApp(ctk.CTk):
+    @handle_error
+    def __init__(self):
+        super().__init__()
+        self.sensor = SensorSimulator()
+        self._initialize_widgets()
+        self._create_widgets()
+        self.start_updates()
+
+    @handle_error
+    def _initialize_widgets(self):
+        # Configure window
+        self.title('Maintenance Prédictive')
+        self.geometry('900x700')
+        self.resizable(True, True)
+        ctk.set_appearance_mode('dark')
+        ctk.set_widget_scaling(1.0)
+
+        self.current_view = None
+
+    @handle_error
+    def _create_widgets(self):
+        # Create main container
+        self.main_container = ctk.CTkFrame(self, fg_color='#2b2b2b')
+        self.main_container.pack(fill=tk.BOTH, expand=True)
+
+        # Create sidebar
+        self.sidebar = ctk.CTkFrame(self.main_container, width=200, fg_color='#008080')
+        self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        self.sidebar.pack_propagate(False)
+
+        # Title
+        ctk.CTkLabel(
+            self.sidebar,
+            text="Maintenance\nPrédictive",
+            font=("Arial", 18, "bold"),
+            text_color='#FFFFFF'
+        ).pack(pady=30)
+
+        # Buttons
+        self.dashboard_btn = ctk.CTkButton(
+            self.sidebar,
+            text='Tableau de Bord',
+            width=160,
+            height=40,
+            fg_color='#006666',
+            hover_color='#80ffff',
+            text_color='#FFFFFF',
+            corner_radius=8,
+            font=('Arial', 14),
+            command=self.show_dashboard
+        )
+        self.dashboard_btn.pack(pady=10, padx=20)
+
+        self.status_btn = ctk.CTkButton(
+            self.sidebar,
+            text='État du Système',
+            width=160,
+            height=40,
+            fg_color='#006666',
+            hover_color='#80ffff',
+            text_color='#FFFFFF',
+            corner_radius=8,
+            font=('Arial', 14),
+            command=self.show_status
+        )
+        self.status_btn.pack(pady=10, padx=20)
+
+        self.chatbot_btn = ctk.CTkButton(
+            self.sidebar,
+            text='Assistant Chat',
+            width=160,
+            height=40,
+            fg_color='#006666',
+            hover_color='#80ffff',
+            text_color='#FFFFFF',
+            corner_radius=8,
+            font=('Arial', 14),
+            command=self.show_chatbot
+        )
+        self.chatbot_btn.pack(pady=10, padx=20)
+
+        # Content area
+        self.content_area = ctk.CTkFrame(self.main_container, fg_color='#55829f')
+        self.content_area.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        # Add copyright at the bottom left
+        try:
+            copyright_img = Image.open('copyright-symbol-icon-on-transparent-background-free-png.png')
+            self.copyright_image = ctk.CTkImage(light_image=copyright_img, dark_image=copyright_img, size=(50, 50))
+
+            # Copyright frame at bottom left
+            copyright_frame = ctk.CTkFrame(self, fg_color='transparent')
+            copyright_frame.place(x=10, rely=0.97, anchor='w')
+
+            # Copyright icon
+            ctk.CTkLabel(
+                copyright_frame,
+                image=self.copyright_image,
+                text=''
+            ).pack(side=tk.LEFT, padx=5)
+
+            # Copyright text
+            ctk.CTkLabel(
+                copyright_frame,
+                text='© Reserved for Nour, Balkiss and Hend',
+                font=('Arial', 10, 'bold'),
+                text_color='#FFFFFF'
+            ).pack(side=tk.LEFT, padx=5)
+
+            print("✓ Copyright ajouté avec succès")
+        except Exception as e:
+            # If no image, show only text
+            ctk.CTkLabel(
+                self,
+                text='© Reserved for Nour, Balkiss and Hend',
+                font=('Arial', 10, 'bold'),
+                text_color='#FFFFFF'
+            ).place(x=10, rely=0.97, anchor='w')
+            print(f"⚠ Image copyright non trouvée - Texte seul affiché")
+
+        # Show dashboard by default
+        self.show_dashboard()
+
+    def show_dashboard(self):
+        """Show dashboard view"""
+        if self.current_view:
+            self.current_view.destroy()
+        self.current_view = DashboardView(self.content_area, self.sensor)
+        self.current_view.pack(fill=tk.BOTH, expand=True)
+
+    def show_status(self):
+        """Show system status view"""
+        if self.current_view:
+            self.current_view.destroy()
+        self.current_view = SystemStatusView(self.content_area, self.sensor)
+        self.current_view.pack(fill=tk.BOTH, expand=True)
+
+    def show_chatbot(self):
+        """Show chatbot view"""
+        if self.current_view:
+            self.current_view.destroy()
+        self.current_view = ChatBotView(self.content_area, self.sensor)
+        self.current_view.pack(fill=tk.BOTH, expand=True)
+
+    def start_updates(self):
+        """Start periodic sensor updates"""
+        self.update_sensors()
+
+    def update_sensors(self):
+        """Update sensor data and views"""
+        self.sensor.update()
+
+        # Update current view
+        if isinstance(self.current_view, DashboardView):
+            self.current_view.update_graphs()
+        elif isinstance(self.current_view, SystemStatusView):
+            self.current_view.update_display()
+
+        # Schedule next update (every 1 second)
+        self.after(1000, self.update_sensors)
+
+
+if __name__ == '__main__':
+    app = ExportedApp()
+    app.mainloop()
